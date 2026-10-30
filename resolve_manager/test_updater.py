@@ -3,14 +3,14 @@ import tempfile
 import unittest
 import zipfile
 from pathlib import Path
-from updater import unpack_verified,version_tuple,valid_asset_url
+from updater import unpack_verified,version_tuple,valid_asset_url,RELEASE_ASSET
 
 class UpdateTests(unittest.TestCase):
     def package(self,folder,names):
         archive=folder/'test.zip'
         with zipfile.ZipFile(archive,'w') as z:
             for name,value in names.items():z.writestr(name,value)
-        checksum=folder/'sha.txt';checksum.write_text(hashlib.sha256(archive.read_bytes()).hexdigest()+'  test.zip')
+        checksum=folder/'sha.txt';checksum.write_text(hashlib.sha256(archive.read_bytes()).hexdigest()+'  '+RELEASE_ASSET)
         return archive,checksum
 
     def test_valid_package_and_checksum_failure(self):

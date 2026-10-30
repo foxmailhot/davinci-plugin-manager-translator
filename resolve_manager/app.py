@@ -57,6 +57,7 @@ class App(tk.Tk):
         heading=ttk.Frame(outer); heading.pack(fill='x')
         ttk.Label(heading, text=APP_NAME, font=('Microsoft YaHei UI', 22, 'bold')).pack(side='left')
         ttk.Button(heading,text='检查更新',command=self.check_update).pack(side='right')
+        ttk.Button(heading,text='发布页',command=self.open_release_page).pack(side='right',padx=6)
         ttk.Label(outer, text=f'OFX 插件管理  /  一键翻译  /  手动更新     v{VERSION}', foreground='#a5a8ae').pack(anchor='w', pady=(5, 16))
         self.summary = tk.StringVar(value='准备扫描…')
         ttk.Label(outer, textvariable=self.summary, font=('Microsoft YaHei UI', 11, 'bold')).pack(anchor='w', pady=(0, 12))
@@ -422,6 +423,10 @@ class App(tk.Tk):
 
     def check_update(self):
         self.run_job(updater.check_latest,self.update_checked)
+
+    def open_release_page(self):
+        import webbrowser
+        webbrowser.open(f'https://github.com/{REPOSITORY}/releases/latest')
 
     def update_checked(self,release):
         if not release:
