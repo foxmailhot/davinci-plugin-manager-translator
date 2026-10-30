@@ -46,13 +46,21 @@ class TranslationTests(unittest.TestCase):
             row=scan([folder])[0][0]; original_hash=digest(plugin)
             result={'path':row['path'],'source_sha256':original_hash,'translations':{'Brightness':'亮度'}}
             with self.assertRaises(RuntimeError):tr.apply_adapter(row,result,folder/'data',process_check=lambda:True)
-            tr.apply_adapter(row,result,folder/'data',process_check=lambda:False)
+            with patch.object(tr,'ensure_compatible'):
+                tr.apply_adapter(row,result,folder/'data',process_check=lambda:False)
             completed=subprocess.run([str(host),str(plugin)],capture_output=True,text=True,timeout=15)
             self.assertEqual(completed.returncode,0,completed.stdout+completed.stderr)
             self.assertIn('PASS',completed.stdout)
+            for mode in ('isolation','borrowed-suite','missing-string','missing-array','missing-reader','cached-reload'):
+                completed=subprocess.run([str(host),str(plugin),mode],capture_output=True,text=True,timeout=15)
+                self.assertEqual(completed.returncode,0,mode+': '+completed.stdout+completed.stderr)
+                self.assertIn('PASS',completed.stdout)
             self.assertEqual(digest(Path(str(plugin)+tr.ORIGINAL)),original_hash)
             tr.restore_adapter(row,process_check=lambda:False)
             self.assertEqual(digest(plugin),original_hash)
             self.assertFalse(Path(str(plugin)+tr.ORIGINAL).exists())
+            with self.assertRaisesRegex(RuntimeError,'尚未通过兼容性验证'):
+                tr.apply_adapter(row,result,folder/'data',process_check=lambda:False)
+            self.assertFalse(Path(str(plugin)+tr.STATE).exists())
 
 if __name__=='__main__':unittest.main()

@@ -16,6 +16,7 @@ from datetime import date, datetime
 from pathlib import Path
 import xml.etree.ElementTree as ET
 from core import DATA, SEED, digest, read_json, write_json, resolve_running
+from compatibility import ensure_compatible, ADAPTER_ABI
 
 ORIGINAL = '.rpm-original'
 WORDS = '.rpm-translations.tsv'
@@ -158,9 +159,12 @@ def apply_adapter(row, result, data=DATA, proxy=None, process_check=resolve_runn
     if result.get('path')!=row['path'] or not result.get('translations'): raise ValueError('请先为所选模块提取并翻译文字。')
     check_pe64(path)
     proxy=Path(proxy) if proxy else asset_path(); check_pe64(proxy)
+    ensure_compatible(row,result['source_sha256'],proxy)
     saved=Path(str(path)+ORIGINAL); state_path=Path(str(path)+STATE); words=Path(str(path)+WORDS)
     state=read_json(state_path,{})
     if saved.exists():
+        if state.get('adapter_abi')!=ADAPTER_ABI:
+            raise RuntimeError('检测到可能导致闪退的旧适配层。请先恢复原版插件，再应用新版翻译。')
         if not state or digest(saved)!=state.get('original_sha256') or digest(path)!=state.get('adapter_sha256'): raise RuntimeError('插件或适配层已变化，请先核对并恢复原版。')
         if digest(saved)!=result['source_sha256']: raise RuntimeError('原始模块已更新，请重新提取和翻译。')
         write_bytes_atomic(words,tsv(result['translations']))
@@ -172,7 +176,8 @@ def apply_adapter(row, result, data=DATA, proxy=None, process_check=resolve_runn
     backup=folder/path.name; shutil.copy2(path,backup)
     if digest(backup)!=result['source_sha256']: raise RuntimeError('原版备份校验失败。')
     state={'original_sha256':digest(path),'adapter_sha256':digest(proxy),'backup':str(backup.resolve()),
-           'path':str(path),'created':datetime.now().isoformat(timespec='seconds'),'translated':len(result['translations']), 'phase':'prepared'}
+           'path':str(path),'created':datetime.now().isoformat(timespec='seconds'),'translated':len(result['translations']), 'phase':'prepared',
+           'adapter_abi':ADAPTER_ABI}
     write_json(folder/'record.json',state)
     write_json(state_path,state)
     staging=path.with_name(path.name+'.rpm-stage')
@@ -218,3 +223,31 @@ def restore_adapter(row, process_check=resolve_running):
         file=Path(str(path)+suffix)
         if file.exists(): file.unlink()
     return state
+
+def recover_legacy_adapters(rows, data=DATA, process_check=resolve_running):
+    """Snapshot legacy adapters and translations before restoring vendor originals."""
+    if process_check(): raise RuntimeError('请先完全退出达芬奇及其他 OFX 宿主，再恢复旧适配层。')
+    legacy=[]
+    for row in rows:
+        path=Path(row['path'])
+        state=read_json(Path(str(path)+STATE),{})
+        if not state or state.get('adapter_abi')==ADAPTER_ABI: continue
+        if row.get('disabled'): raise RuntimeError('存在已禁用的旧适配层，请先从备份页启用，再恢复原版。')
+        saved=Path(str(path)+ORIGINAL)
+        if not saved.is_file() or digest(saved)!=state.get('original_sha256') or digest(path)!=state.get('adapter_sha256'):
+            raise RuntimeError('旧适配层文件校验失败，已停止恢复：'+path.name)
+        legacy.append(row)
+    if not legacy:return {'count':0,'snapshot':None}
+    folder=Path(data)/'recovery'/(datetime.now().strftime('%Y%m%d-%H%M%S')+'-'+uuid.uuid4().hex[:8])
+    folder.mkdir(parents=True)
+    for index,row in enumerate(legacy,1):
+        path=Path(row['path']);dest=folder/f'{index:02d}-{path.stem}';dest.mkdir()
+        for suffix in ('',STATE,WORDS,ORIGINAL):
+            source=Path(str(path)+suffix)
+            if source.is_file():shutil.copy2(source,dest/source.name)
+    write_json(folder/'recovery.json',{'modules':legacy,'restored':[]})
+    restored=[]
+    for row in legacy:
+        restore_adapter(row,process_check=process_check)
+        restored.append(row['path']);write_json(folder/'recovery.json',{'modules':legacy,'restored':restored})
+    return {'count':len(restored),'snapshot':str(folder.resolve())}

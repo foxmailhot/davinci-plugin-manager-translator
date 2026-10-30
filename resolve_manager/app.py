@@ -87,6 +87,7 @@ class App(tk.Tk):
         ttk.Button(actions, text='打开所在目录', command=self.open_folder).pack(side='left')
         ttk.Button(actions, text='一键翻译所选插件',style='Accent.TButton',command=self.translate_selected).pack(side='left',padx=8)
         ttk.Button(actions, text='备份并禁用所选模块', command=self.disable_selected).pack(side='left', padx=8)
+        ttk.Button(actions, text='恢复旧版翻译适配层', command=self.recover_legacy).pack(side='left',padx=4)
         ttk.Label(plugins, text='禁用或应用翻译影响所有加载此 OFX 的软件；操作前请先退出相关宿主，重启后生效。', foreground='#c5a478', wraplength=1040).pack(anchor='w', pady=(12,0))
         ttk.Label(dictionary, text='中文词库工作台', font=('Microsoft YaHei UI', 14, 'bold')).pack(anchor='w')
         ttk.Label(dictionary, text='手动校对的译文优先于机器翻译。编辑后，在插件翻译页重新翻译并应用，以更新界面译文。', wraplength=1030).pack(anchor='w', pady=8)
@@ -169,6 +170,8 @@ class App(tk.Tk):
         self.rows, errors = result
         self.render(); self.render_backups()
         self.status.set('扫描完成。' + (' 部分目录未扫描：' + '；'.join(errors) if errors else '未加载或执行插件代码。'))
+        legacy=[r for r in self.rows if (s:=read_json(Path(r['path']+translation.STATE),{})) and s.get('adapter_abi')!=translation.ADAPTER_ABI]
+        if legacy:self.status.set(f'发现 {len(legacy)} 个旧版翻译适配层，可能造成启动闪退。请先退出宿主，点击“恢复旧版翻译适配层”。词库会保留。')
 
     def render(self):
         self.tree.delete(*self.tree.get_children()); self.visible = {}
@@ -190,7 +193,7 @@ class App(tk.Tk):
         row = self.selected()
         if row:
             state=read_json(Path(row['path']+translation.STATE),{})
-            text=f"已安装实验适配层，{state.get('translated',0)} 条译文；宿主显示需验证" if state else '未安装翻译适配层'
+            text=(f"已应用修复适配层 ABI 2，{state.get('translated',0)} 条译文；仍需检查各效果渲染" if state.get('adapter_abi')==translation.ADAPTER_ABI else '旧版适配层，请先恢复原版后升级') if state else '未安装翻译适配层'
             self.detail.set(f"模块：{row['name']}  |  修改时间：{row['modified']}\n插件包：{row['bundle']}\n翻译状态：{text}")
 
     def open_path(self, path):
@@ -386,7 +389,7 @@ class App(tk.Tk):
     def apply_translation(self):
         if self.busy: return
         if not self.translation_result or not self.translation_result['translations']: messagebox.showinfo('没有译文','请先完成提取和翻译。'); return
-        if not messagebox.askyesno('应用实验翻译适配层',f"模块：{self.translation_row['name']}\n将应用 {len(self.translation_result['translations'])} 条候选译文。\n\n适配层尚未完成真实 BCC 的达芬奇兼容性验证，可能导致插件无法加载。会备份原版，可恢复。它影响所有加载此模块的 OFX 宿主，不翻译独立编辑器。\n\n请退出所有相关宿主后继续，应用后重启达芬奇。现在应用？"): return
+        if not messagebox.askyesno('应用实验翻译适配层',f"模块：{self.translation_row['name']}\n将应用 {len(self.translation_result['translations'])} 条候选译文。\n\n仅允许已验证的插件和达芬奇版本。适配层已修复旧版的回调生命周期问题，启动验证不代表所有效果的渲染均已验证。会备份原版，可恢复；它影响所有 OFX 宿主，不翻译独立编辑器。\n\n请退出所有相关宿主后继续，应用后重启达芬奇。现在应用？"): return
         row=dict(self.translation_row); result=self.translation_result
         self.run_job(lambda:translation.apply_adapter(row,result,DATA),lambda _:self.applied())
 
@@ -400,6 +403,15 @@ class App(tk.Tk):
         if not row: messagebox.showinfo('选择插件','请先选择插件。'); return
         if messagebox.askyesno('恢复原版','请先退出所有相关宿主。现在移除翻译适配层并恢复原版模块？'):
             self.run_job(lambda:translation.restore_adapter(row),lambda _:self.reload())
+
+    def recover_legacy(self):
+        if self.busy:return
+        if messagebox.askyesno('恢复旧版翻译适配层','将备份旧适配层和译文，校验并恢复原厂 OFX 模块。\n原有词库和翻译缓存保留。\n请先退出达芬奇及其他宿主。现在恢复？'):
+            rows=[dict(r) for r in self.rows]
+            def completed(result):
+                messagebox.showinfo('恢复完成',f'已恢复 {result["count"]} 个模块。'+(f'\n故障现场保存在：{result["snapshot"]}' if result['snapshot'] else '\n未发现旧版适配层。'))
+                self.reload()
+            self.run_job(lambda:translation.recover_legacy_adapters(rows,DATA),completed)
 
     def export_translation(self):
         if not self.translation_result: return

@@ -6,3 +6,4 @@ __pycache__/
 *.pyc
 resolve_manager/assets/
 resolve_manager/native/setters.inc
+resolve_manager/native/forwarders.inc

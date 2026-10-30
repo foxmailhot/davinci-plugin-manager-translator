@@ -7,15 +7,33 @@
 #include "ofxCore.h"
 #include "ofxProperty.h"
 
-#define MAX_PLUGINS 2048
+#define MAX_PLUGINS 512
 static HMODULE original_module;
 static OfxPlugin *originals[MAX_PLUGINS], copies[MAX_PLUGINS];
-static OfxHost *real_host;
-static OfxHost bridge_host;
-static const OfxPropertySuiteV1 *real_props;
-static OfxPropertySuiteV1 bridge_props;
+typedef struct HostContext {
+    OfxHost real_host, bridge_host;
+    OfxPropertySuiteV1 bridge_props;
+    SRWLOCK lock;
+    int props_ready;
+} HostContext;
+static HostContext hosts[MAX_PLUGINS];
+typedef struct Callbacks {
+    void (*set_host)(OfxHost *);
+    const void *(*fetch)(OfxPropertySetHandle,const char *,int);
+    OfxPluginEntryPoint *entry;
+    OfxPropertySuiteV1 properties;
+} Callbacks;
+static void set_host_index(int,OfxHost *);
+static const void *fetch_suite_index(int,OfxPropertySetHandle,const char *,int);
+static OfxStatus set_string_index(int,OfxPropertySetHandle,const char *,int,const char *);
+static OfxStatus set_strings_index(int,OfxPropertySetHandle,const char *,int,const char *const *);
+static OfxStatus main_index(int,const char *,const void *,OfxPropertySetHandle,OfxPropertySetHandle);
+static const OfxPropertySuiteV1 *current_props(int);
+#include "forwarders.inc"
+#include "setters.inc"
 static INIT_ONCE init_once = INIT_ONCE_STATIC_INIT;
-static SRWLOCK suite_lock = SRWLOCK_INIT;
+static SRWLOCK plugin_lock = SRWLOCK_INIT;
+static int plugin_count;
 static int (*get_count)(void);
 static OfxPlugin *(*get_plugin)(int);
 static char **keys, **values;
@@ -48,41 +66,69 @@ static const char *translated(const char *text) {
     return text;
 }
 
-static OfxStatus set_string(OfxPropertySetHandle h,const char *p,int i,const char *v) {
-    return real_props->propSetString(h,p,i,display_property(p)?translated(v):v);
+static OfxStatus set_string_index(int index,OfxPropertySetHandle h,const char *p,int i,const char *v) {
+    const OfxPropertySuiteV1 *props=current_props(index);
+    if(!props || !props->propSetString) return kOfxStatErrMissingHostFeature;
+    return props->propSetString(h,p,i,display_property(p)?translated(v):v);
 }
 
-static OfxStatus set_strings(OfxPropertySetHandle h,const char *p,int n,const char *const *v) {
-    if (!display_property(p) || n<=0 || !v) return real_props->propSetStringN(h,p,n,v);
+static OfxStatus set_strings_index(int index,OfxPropertySetHandle h,const char *p,int n,const char *const *v) {
+    const OfxPropertySuiteV1 *props=current_props(index);
+    if(!props || !props->propSetStringN) return kOfxStatErrMissingHostFeature;
+    if (!display_property(p) || n<=0 || !v) return props->propSetStringN(h,p,n,v);
     const char **result = malloc(sizeof(char *)*(size_t)n);
-    if (!result) return real_props->propSetStringN(h,p,n,v);
+    if (!result) return props->propSetStringN(h,p,n,v);
     for(int i=0;i<n;++i) result[i]=translated(v[i]);
-    OfxStatus status=real_props->propSetStringN(h,p,n,result); free(result); return status;
+    OfxStatus status=props->propSetStringN(h,p,n,result); free(result); return status;
 }
 
-static const void *fetch_suite(OfxPropertySetHandle h,const char *name,int version) {
-    const void *suite=real_host->fetchSuite(h,name,version);
+static const OfxPropertySuiteV1 *current_props(int index) {
+    HostContext *ctx=&hosts[index];
+    if(!ctx->real_host.fetchSuite) return NULL;
+    const void *suite=ctx->real_host.fetchSuite(ctx->real_host.host,kOfxPropertySuite,1);
+    return suite && suite!=&ctx->bridge_props ? suite : NULL;
+}
+
+static const void *fetch_suite_index(int index,OfxPropertySetHandle h,const char *name,int version) {
+    HostContext *ctx=&hosts[index];
+    if(!ctx->real_host.fetchSuite || !name) return NULL;
+    const void *suite=ctx->real_host.fetchSuite(h,name,version);
     if (!suite || strcmp(name,kOfxPropertySuite) || version!=1) return suite;
-    AcquireSRWLockExclusive(&suite_lock);
-    if (!real_props) {
-        real_props=suite; bridge_props=*real_props;
-        bridge_props.propSetString=set_string; bridge_props.propSetStringN=set_strings;
+    AcquireSRWLockExclusive(&ctx->lock);
+    if (!ctx->props_ready) {
+        if(suite==&ctx->bridge_props) { ReleaseSRWLockExclusive(&ctx->lock); return NULL; }
+        /* Every callback is guarded and resolves the original suite in this effect's host. */
+        ctx->bridge_props=callbacks[index].properties;
+        ctx->props_ready=1;
     }
-    ReleaseSRWLockExclusive(&suite_lock);
-    return &bridge_props;
+    ReleaseSRWLockExclusive(&ctx->lock);
+    return &ctx->bridge_props;
 }
 
 /* Generated per-index setters preserve separate setHost callbacks in multi-effect modules. */
 static void set_host_index(int index,OfxHost *host) {
-    real_host=host; bridge_host=*host; bridge_host.fetchSuite=fetch_suite;
-    if(originals[index] && originals[index]->setHost) originals[index]->setHost(&bridge_host);
+    if(!host || !originals[index]) return;
+    HostContext *ctx=&hosts[index];
+    AcquireSRWLockExclusive(&ctx->lock);
+    ctx->real_host=*host; ctx->bridge_host=*host;
+    ctx->bridge_host.fetchSuite=callbacks[index].fetch;
+    ctx->props_ready=0;
+    ReleaseSRWLockExclusive(&ctx->lock);
+    if(originals[index]->setHost) originals[index]->setHost(&ctx->bridge_host);
 }
-#include "setters.inc"
+
+static OfxStatus main_index(int index,const char *action,const void *handle,OfxPropertySetHandle in,OfxPropertySetHandle out) {
+    OfxPlugin *original=originals[index];
+    if(!original || !original->mainEntry) return kOfxStatErrMissingHostFeature;
+    return original->mainEntry(action,handle,in,out);
+}
 
 static BOOL CALLBACK initialize(PINIT_ONCE once,void *parameter,void **context) {
     (void)once; (void)parameter; (void)context;
     wchar_t path[32768], dict[32768]; HMODULE self=NULL;
-    GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS|GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+    /* Vendor DLLs retain the returned suites across OFX scan/unload/reload cycles.
+       Keep our callback code and tables alive for exactly as long as the delegated DLLs. */
+    GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS|GET_MODULE_HANDLE_EX_FLAG_PIN,
                       (LPCWSTR)(void *)&initialize,&self);
     DWORD size=GetModuleFileNameW(self,path,32700);
     if (!size || size>=32700) return TRUE;
@@ -116,21 +162,31 @@ static BOOL CALLBACK initialize(PINIT_ONCE once,void *parameter,void **context) 
     if(original_module) {
         get_count=(void *)GetProcAddress(original_module,"OfxGetNumberOfPlugins");
         get_plugin=(void *)GetProcAddress(original_module,"OfxGetPlugin");
+        if(get_count && get_plugin) {
+            int count=get_count();
+            plugin_count=count>=0 && count<=MAX_PLUGINS?count:0;
+        }
     }
     return TRUE;
 }
 
 __declspec(dllexport) int OfxGetNumberOfPlugins(void) {
     InitOnceExecuteOnce(&init_once,initialize,NULL,NULL);
-    if(!get_count || !get_plugin) return 0;
-    int count=get_count(); return count<0 || count>MAX_PLUGINS ? 0 : count;
+    return plugin_count;
 }
+
+__declspec(dllexport) const char *RpmAdapterIdentity(void) { return "RPM_ADAPTER_ABI_2"; }
 
 __declspec(dllexport) OfxPlugin *OfxGetPlugin(int index) {
     if(index<0 || index>=OfxGetNumberOfPlugins()) return NULL;
+    AcquireSRWLockExclusive(&plugin_lock);
     if(!originals[index]) {
-        OfxPlugin *p=get_plugin(index); if(!p) return NULL;
-        originals[index]=p; copies[index]=*p; copies[index].setHost=setters[index];
+        OfxPlugin *p=get_plugin(index);
+        if(!p) { ReleaseSRWLockExclusive(&plugin_lock); return NULL; }
+        originals[index]=p; copies[index]=*p;
+        copies[index].setHost=callbacks[index].set_host;
+        copies[index].mainEntry=callbacks[index].entry;
     }
+    ReleaseSRWLockExclusive(&plugin_lock);
     return &copies[index];
 }
