@@ -1,11 +1,16 @@
 name: Build and release
 on:
   workflow_dispatch:
+  release:
+    types: [published]
   push:
     tags:
       - 'v*'
 permissions:
   contents: read
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
 jobs:
   windows:
     runs-on: windows-latest
