@@ -1,7 +1,8 @@
+param([string]$ToolsDirectory = '.tools')
 $ErrorActionPreference = 'Stop'
 Set-Location -LiteralPath $PSScriptRoot
-$env:PYTHONPATH = Join-Path $PSScriptRoot '.tools/packaging'
-$zigPath = Join-Path $PSScriptRoot '.tools/ziglang/zig.exe'
+$env:PYTHONPATH = Join-Path $ToolsDirectory 'packaging'
+$zigPath = Join-Path $ToolsDirectory 'ziglang/zig.exe'
 if (!(Test-Path -LiteralPath $zigPath)) { throw 'Install Zig 0.13.0: python -m pip install --target .tools ziglang==0.13.0' }
 python resolve_manager/build_native.py --zig $zigPath
 if ($LASTEXITCODE -ne 0) { throw 'OFX translation adapter build failed' }

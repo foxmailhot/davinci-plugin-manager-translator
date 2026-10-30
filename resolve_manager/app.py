@@ -299,7 +299,7 @@ class App(tk.Tk):
         frame=self.translation_tab
         self.translation_title=tk.StringVar(value='先在插件清单选择模块，点击“一键翻译所选插件”')
         ttk.Label(frame,textvariable=self.translation_title,font=('Microsoft YaHei UI',13,'bold'),wraplength=1020).pack(anchor='w')
-        ttk.Label(frame,text='流程：提取候选文字 → 翻译预览 → 应用至 OFX。静态提取可能包含非界面文字，候选完成率不等于真实界面覆盖率。',wraplength=1020,foreground='#a5a8ae').pack(anchor='w',pady=7)
+        ttk.Label(frame,text='每包 1000 条，按接口限制拆分请求；发送下一包的同时核对上一包。异常按编号定位并重试，候选数不等于界面覆盖率。',wraplength=1020,foreground='#a5a8ae').pack(anchor='w',pady=7)
         row=ttk.Frame(frame); row.pack(fill='x',pady=5)
         ttk.Label(row,text='翻译服务').pack(side='left')
         self.provider=tk.StringVar(value=self.settings.get('provider',translation.PROVIDERS[0]))
@@ -315,10 +315,10 @@ class App(tk.Tk):
         ttk.Label(frame,text='在线翻译仅发送候选英文文字。MyMemory 免密钥、限额；Google 网页接口非官方、可能失效；Google Cloud 需自备密钥并自行管理账单。',wraplength=1020,foreground='#c5a478').pack(anchor='w',pady=(0,8))
         self.translation_status=tk.StringVar(value='等待选择插件')
         ttk.Label(frame,textvariable=self.translation_status,wraplength=1030).pack(anchor='w',pady=(0,7))
-        self.preview=self.make_tree(frame,[('en','提取的英文候选文字',480),('zh','中文译文',470)])
+        self.preview=self.make_tree(frame,[('en','提取的英文候选文字',370),('zh','中文译文',370),('check','核对结果 / 原文行号',200)])
         self.preview.configure(height=4)
         buttons=ttk.Frame(frame); buttons.pack(fill='x',pady=(10,0))
-        for text,cmd in [('继续 / 重新翻译',self.translate_current),('应用至插件（实验）',self.apply_translation),('恢复原版插件',self.restore_translation),('导出本插件译文',self.export_translation)]:
+        for text,cmd in [('继续 / 重新翻译',self.translate_current),('应用至插件（实验）',self.apply_translation),('恢复原版插件',self.restore_translation),('导出译文',self.export_translation),('打开批次报告',self.open_batch_report)]:
             ttk.Button(buttons,text=text,command=cmd).pack(side='left',padx=(0,7))
 
     def progress(self,text):
@@ -365,12 +365,23 @@ class App(tk.Tk):
     def translated(self,result):
         self.translation_result=result
         self.preview.delete(*self.preview.get_children())
-        for text in result['texts']:
-            self.preview.insert('','end',values=(text,result['translations'].get(text,'待翻译')))
+        problems={r['source']:r for r in result.get('unmatched_records',[])}
+        from batch_translation import ISSUE_LABELS
+        for index,text in enumerate(result['texts'],1):
+            problem=problems.get(text,{})
+            reason=ISSUE_LABELS.get(problem.get('reason'),'待核对')
+            state=f'已匹配 / 行 {index}' if text in result['translations'] else f'{reason} / 行 {problem.get("line",index)}'
+            self.preview.insert('','end',values=(text,result['translations'].get(text,'待翻译'),state))
         count=len(result['translations']); total=len(result['texts'])
-        text=f'候选译文 {count}/{total}；待翻译 {result["remaining"]}。译文已保存，可继续翻译或应用当前结果。'
+        text=f'候选译文 {count}/{total}；待翻译 {result["remaining"]}；核对 {result.get("verified_packages",0)} 包。异常位置与返回原文已存入批次报告。'
         if result.get('error'): text+=' '+result['error']
         self.translation_status.set(text); self.status.set(text)
+
+    def open_batch_report(self):
+        if self.translation_result and self.translation_result.get('job_folder'):
+            self.open_path(Path(self.translation_result['job_folder']))
+        else:
+            self.open_path(DATA/'batch-jobs') if (DATA/'batch-jobs').exists() else messagebox.showinfo('批次报告','完成一次翻译后可在此查看打包文件、返回原文及核对报告。')
 
     def apply_translation(self):
         if self.busy: return

@@ -136,32 +136,9 @@ def translate_one(text, provider, api_key='', endpoint='http://127.0.0.1:5000'):
     if not re.search(r'[\u3400-\u9fff]',value): raise RuntimeError('接口返回的内容没有中文，已停止；已有译文已保留。')
     return value
 
-def translate_catalog(catalog, dictionary, provider, data=DATA, api_key='', endpoint='http://127.0.0.1:5000', progress=lambda text:None, cancel=None):
-    cache_path=Path(data)/'translation-cache.json'
-    cache=read_json(cache_path,{})
-    dictionary={**COMMON,**SEED,**cache,**dictionary}
-    translations={k:dictionary[k] for k in catalog['texts'] if k in dictionary}
-    pending=[k for k in catalog['texts'] if k not in translations]
-    error=None
-    quota_path=Path(data)/'mymemory-usage.json'; quota=read_json(quota_path,{})
-    if quota.get('day')!=date.today().isoformat(): quota={'day':date.today().isoformat(),'characters':0}
-    for index,text in enumerate(pending):
-        if provider==PROVIDERS[-1]: break
-        if cancel and cancel.is_set(): error='已停止，已有译文已保存。'; break
-        try:
-            if provider==PROVIDERS[0]:
-                if quota['characters']+len(text)>4500: raise RuntimeError('本程序已达到 MyMemory 今日 4500 字符预算，已保存进度。')
-                quota['characters']+=len(text); write_json(quota_path,quota)
-            progress(f'翻译 {index+1}/{len(pending)}：{text[:65]}（已完成 {len(translations)}/{len(catalog["texts"])}）')
-            translations[text]=translate_one(text,provider,api_key,endpoint)
-            cache[text]=translations[text]; write_json(cache_path,cache)
-            time.sleep(.25)
-        except Exception as e:
-            error=str(e); break
-    result={**catalog,'translations':translations,'remaining':len(catalog['texts'])-len(translations),'provider':provider,'error':error}
-    key=__import__('hashlib').sha256(catalog['path'].encode()).hexdigest()[:24]
-    write_json(Path(data)/'catalogs'/(key+'.json'),result)
-    return result
+def translate_catalog(catalog, dictionary, provider, data=DATA, api_key='', endpoint='http://127.0.0.1:5000', progress=lambda text:None, cancel=None, batch_size=1000):
+    from batch_translation import run_catalog
+    return run_catalog(catalog,dictionary,provider,data,api_key,endpoint,progress,cancel,batch_size)
 
 def tsv(translations):
     def escaped(s): return s.replace('\\','\\\\').replace('\t','\\t').replace('\r','\\r').replace('\n','\\n')

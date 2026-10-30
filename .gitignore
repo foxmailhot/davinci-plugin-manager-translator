@@ -1,4 +1,5 @@
 .tools/
+.tools-*/
 dist/
 release/
 __pycache__/

@@ -23,7 +23,7 @@ class TranslationTests(unittest.TestCase):
             self.assertNotIn('not-a-real-key',request.call_args.args[0])
         with tempfile.TemporaryDirectory() as folder:
             catalog={'path':'test.ofx','texts':['Brightness','Some Effect']}
-            with patch.object(tr,'translate_one',return_value='测试特效') as call,patch.object(tr.time,'sleep'):
+            with patch('batch_translation.send_chunk',side_effect=lambda rows,*args: [f'[[{r["id"]}]] 测试特效' for r in rows]) as call:
                 result=tr.translate_catalog(catalog,{},tr.PROVIDERS[1],Path(folder))
                 self.assertEqual(call.call_count,1); self.assertEqual(result['remaining'],0)
                 again=tr.translate_catalog(catalog,{},tr.PROVIDERS[1],Path(folder))
@@ -32,7 +32,7 @@ class TranslationTests(unittest.TestCase):
     def test_failure_preserves_partial_result_and_cancel(self):
         with tempfile.TemporaryDirectory() as folder:
             catalog={'path':'test.ofx','texts':['Brightness','Pending effect']}
-            with patch.object(tr,'translate_one',side_effect=RuntimeError('quota exhausted')):
+            with patch('batch_translation.send_chunk',side_effect=RuntimeError('quota exhausted')):
                 result=tr.translate_catalog(catalog,{},tr.PROVIDERS[0],Path(folder))
             self.assertEqual(result['remaining'],1); self.assertIn('Brightness',result['translations']);self.assertIn('quota',result['error'])
 
