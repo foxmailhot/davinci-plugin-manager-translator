@@ -1,0 +1,43 @@
+name: Build and release
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+permissions:
+  contents: read
+jobs:
+  windows:
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install build tools
+        shell: pwsh
+        run: |
+          python -m pip install --target .tools/packaging pyinstaller==6.22.3
+          python -m pip install --target .tools ziglang==0.13.0
+      - name: Build
+        shell: pwsh
+        run: ./build-resolve-manager.ps1
+      - name: Test
+        shell: pwsh
+        run: python -m unittest discover -s resolve_manager -p 'test_*.py' -v
+      - name: Package
+        shell: pwsh
+        run: python resolve_manager/release_package.py 'dist/达芬奇插件管理与翻译软件' release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ResolvePluginManager-windows-x64
+          path: release/*
+      - name: Publish tagged release
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create $env:GITHUB_REF_NAME release/* --title "达芬奇插件管理与翻译软件 $env:GITHUB_REF_NAME" --generate-notes

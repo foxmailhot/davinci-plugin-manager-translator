@@ -1,0 +1,7 @@
+.tools/
+dist/
+release/
+__pycache__/
+*.pyc
+resolve_manager/assets/
+resolve_manager/native/setters.inc
