@@ -4,6 +4,8 @@ on:
   release:
     types: [published]
   push:
+    branches: [main]
+    paths: ['resolve_manager/version.py']
     tags:
       - 'v*'
 permissions:
@@ -40,15 +42,19 @@ jobs:
           name: ResolvePluginManager-windows-x64
           path: release/*
       - name: Publish tagged release
-        if: startsWith(github.ref, 'refs/tags/')
+        if: startsWith(github.ref, 'refs/tags/') || github.ref == 'refs/heads/main'
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release view $env:GITHUB_REF_NAME --json tagName *> $null
+          $version = python -c "import sys; sys.path.insert(0, 'resolve_manager'); from version import VERSION; print(VERSION)"
+          if ($LASTEXITCODE -ne 0 -or $version -notmatch '^\d+\.\d+\.\d+$') { throw 'Invalid release version' }
+          $releaseTag = "v$version"
+          if ($env:GITHUB_REF_TYPE -eq 'tag' -and $env:GITHUB_REF_NAME -ne $releaseTag) { throw 'Tag/version mismatch' }
+          gh release view $releaseTag --json tagName *> $null
           if ($LASTEXITCODE -eq 0) {
-            gh release upload $env:GITHUB_REF_NAME release/* --clobber
+            gh release upload $releaseTag release/* --clobber
           } else {
-            gh release create $env:GITHUB_REF_NAME release/* --title "达芬奇插件管理与翻译软件 $env:GITHUB_REF_NAME" --generate-notes
+            gh release create $releaseTag release/* --target $env:GITHUB_SHA --title "达芬奇插件管理与翻译软件 $releaseTag" --generate-notes
           }
           if ($LASTEXITCODE -ne 0) { throw 'Release publishing failed' }

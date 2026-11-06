@@ -93,7 +93,7 @@ def validate_response(records, raw):
     return accepted,issues
 
 def send_chunk(records, provider, api_key, endpoint, data):
-    from translation import PROVIDERS, request_json
+    from translation import PROVIDERS, request_json, google_text
     text='\n'.join(tagged(r) for r in records)
     if provider==PROVIDERS[0]:
         quota_path=Path(data)/'mymemory-usage.json'; quota=read_json(quota_path,{})
@@ -105,7 +105,7 @@ def send_chunk(records, provider, api_key, endpoint, data):
         return response.get('responseData',{}).get('translatedText','')
     if provider==PROVIDERS[1]:
         response=request_json('https://translate.googleapis.com/translate_a/single?'+urllib.parse.urlencode({'client':'gtx','sl':'en','tl':'zh-CN','dt':'t','q':text}))
-        return ''.join(item[0] for item in response[0] if item and item[0])
+        return google_text(response)
     if provider==PROVIDERS[2]:
         if not api_key.strip(): raise ValueError('请填写 Google Cloud 密钥或选择免密钥接口。')
         response=request_json('https://translation.googleapis.com/language/translate/v2',
@@ -121,6 +121,7 @@ def send_chunk(records, provider, api_key, endpoint, data):
     raise ValueError('所选接口不支持在线翻译。')
 
 def send_bundle(bundle,provider,api_key,endpoint,data,folder,progress,cancel):
+    from translation import TranslationServiceError
     chunks=deque(plan_chunks(bundle['records'],provider,cap=bundle.get('cap')))
     responses=[]; error=None; sequence=0
     while chunks:
@@ -130,7 +131,20 @@ def send_bundle(bundle,provider,api_key,endpoint,data,folder,progress,cancel):
         request_path=folder/f'{bundle["name"]}.part-{sequence:04d}.request.json'
         write_json(request_path,{'provider':provider,'records':chunk,'sent_at':datetime.now().isoformat(timespec='seconds')})
         try:
-            raw=send_chunk(chunk,provider,api_key,endpoint,data)
+            for attempt in range(1,4):
+                try:
+                    raw=send_chunk(chunk,provider,api_key,endpoint,data)
+                    break
+                except TranslationServiceError as failure:
+                    write_json(folder/f'{bundle["name"]}.part-{sequence:04d}.attempt-{attempt}.error.json',
+                        {'error':str(failure),'attempt':attempt,'retryable':failure.retryable,
+                         'source_lines':[r['line'] for r in chunk]})
+                    if not failure.retryable or attempt==3: raise
+                    delay=max((2,5)[attempt-1],failure.retry_after)
+                    progress(f'任务包 {bundle["number"]} / 子请求 {sequence}：{failure} '
+                             f'{delay:g} 秒后自动重试（{attempt}/2）；可点击停止翻译。')
+                    if cancel.wait(delay):
+                        raise RuntimeError('已停止，已返回的结果仍会核对和保存。')
             write_json(folder/f'{bundle["name"]}.part-{sequence:04d}.response.json',{'raw':raw})
             responses.append({'records':chunk,'raw':raw,'part':sequence})
         except Exception as e:
@@ -140,7 +154,7 @@ def send_bundle(bundle,provider,api_key,endpoint,data,folder,progress,cancel):
                 mid=len(chunk)//2; chunks.appendleft(chunk[mid:]); chunks.appendleft(chunk[:mid])
                 write_json(folder/f'{bundle["name"]}.part-{sequence:04d}.error.json',{'error':message,'action':'split_half','records':chunk})
                 continue
-            error=message
+            error=message+' 已暂停；已完成的译文已保留，点击“继续 / 重新翻译”只发送未完成项。'
             write_json(folder/f'{bundle["name"]}.part-{sequence:04d}.error.json',{'error':message,'records':chunk})
             break
     return {'bundle':bundle,'responses':responses,'error':error}

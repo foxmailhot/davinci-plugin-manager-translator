@@ -377,7 +377,8 @@ class App(tk.Tk):
             state=f'已匹配 / 行 {index}' if text in result['translations'] else f'{reason} / 行 {problem.get("line",index)}'
             self.preview.insert('','end',values=(text,result['translations'].get(text,'待翻译'),state))
         count=len(result['translations']); total=len(result['texts'])
-        text=f'候选译文 {count}/{total}；待翻译 {result["remaining"]}；核对 {result.get("verified_packages",0)} 包。异常位置与返回原文已存入批次报告。'
+        state='已暂停' if result.get('error') else ('翻译完成' if not result['remaining'] else '本轮已结束')
+        text=f'{state}：候选译文 {count}/{total}；待翻译 {result["remaining"]}；核对 {result.get("verified_packages",0)} 包。异常位置与返回原文已存入批次报告。'
         if result.get('error'): text+=' '+result['error']
         self.translation_status.set(text); self.status.set(text)
 

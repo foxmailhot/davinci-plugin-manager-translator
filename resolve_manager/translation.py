@@ -1,6 +1,7 @@
 """Display-text extraction, optional online translation, and reversible OFX adapter deployment."""
 from __future__ import annotations
 import html
+import http.client
 import json
 import os
 import re
@@ -99,6 +100,14 @@ def extract(row):
             'sources':sources,'extracted_at':datetime.now().isoformat(timespec='seconds'),
             'note':'静态提取候选文字，可能包含未使用或非界面字符串；数量不是效果数或真实界面覆盖率。'}
 
+class TranslationServiceError(RuntimeError):
+    """Safe diagnostic without request URLs, text or API keys."""
+    def __init__(self, message, retryable=False, retry_after=0):
+        super().__init__(message)
+        self.retryable=retryable
+        self.retry_after=retry_after
+
+
 def request_json(url, payload=None, headers=None):
     request = urllib.request.Request(url,data=json.dumps(payload).encode('utf-8') if payload is not None else None,
         headers={'User-Agent':'ResolvePluginManager/0.2','Accept':'application/json',**({'Content-Type':'application/json'} if payload is not None else {}),**(headers or {})})
@@ -106,9 +115,17 @@ def request_json(url, payload=None, headers=None):
         with urllib.request.urlopen(request,timeout=18) as response:
             return json.loads(response.read(4*1024*1024).decode('utf-8'))
     except urllib.error.HTTPError as e:
-        raise RuntimeError(f'翻译服务返回 HTTP {e.code}，请检查额度、密钥或服务状态。') from None
-    except (urllib.error.URLError,TimeoutError,ValueError):
-        raise RuntimeError('无法连接翻译服务或响应无效，请检查网络后重试。') from None
+        retryable=e.code in (408,429,500,502,503,504)
+        try: retry_after=max(0,min(60,float(e.headers.get('Retry-After','0'))))
+        except (ValueError,TypeError,AttributeError): retry_after=0
+        raise TranslationServiceError(f'翻译服务返回 HTTP {e.code}。'+
+            ('服务暂时不可用或请求过快。' if retryable else '请检查额度、密钥或服务状态。'),retryable,retry_after) from None
+    except (OSError,http.client.IncompleteRead) as e:
+        reason=getattr(e,'reason',e)
+        detail='请求超时' if isinstance(reason,TimeoutError) else '连接失败或中断'
+        raise TranslationServiceError(f'翻译服务{detail}，请检查网络或代理连接。',True) from None
+    except (ValueError,UnicodeError):
+        raise TranslationServiceError('翻译服务返回无效 JSON 响应。',True) from None
 
 def translate_one(text, provider, api_key='', endpoint='http://127.0.0.1:5000'):
     if provider == PROVIDERS[0]:
@@ -118,7 +135,7 @@ def translate_one(text, provider, api_key='', endpoint='http://127.0.0.1:5000'):
         value = result.get('responseData',{}).get('translatedText','')
     elif provider == PROVIDERS[1]:
         result = request_json('https://translate.googleapis.com/translate_a/single?'+urllib.parse.urlencode({'client':'gtx','sl':'en','tl':'zh-CN','dt':'t','q':text}))
-        value = ''.join(x[0] for x in result[0] if x and x[0])
+        value = google_text(result)
     elif provider == PROVIDERS[2]:
         if not api_key.strip(): raise ValueError('请填写 Google Cloud API 密钥，或选择免密钥接口。')
         result = request_json('https://translation.googleapis.com/language/translate/v2',
@@ -136,6 +153,16 @@ def translate_one(text, provider, api_key='', endpoint='http://127.0.0.1:5000'):
     value = html.unescape(value).strip()
     if not re.search(r'[\u3400-\u9fff]',value): raise RuntimeError('接口返回的内容没有中文，已停止；已有译文已保留。')
     return value
+
+
+def google_text(response):
+    try:
+        if not isinstance(response,list) or not response or not isinstance(response[0],list): raise ValueError
+        pieces=[item[0] for item in response[0] if item and item[0]]
+        if not pieces or not all(isinstance(item,str) for item in pieces): raise ValueError
+        return ''.join(pieces)
+    except (IndexError,KeyError,TypeError,ValueError):
+        raise TranslationServiceError('Google 网页翻译返回的格式无效或译文为空。',True) from None
 
 def translate_catalog(catalog, dictionary, provider, data=DATA, api_key='', endpoint='http://127.0.0.1:5000', progress=lambda text:None, cancel=None, batch_size=1000):
     from batch_translation import run_catalog
